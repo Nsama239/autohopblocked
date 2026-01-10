@@ -15,6 +15,7 @@ local localPlayer = Players.LocalPlayer
 local lastHop = 0
 local blockedSet = {}
 local lastLoadedCount = 0
+local requestFunc = (syn and syn.request) or (http and http.request) or request or http_request
 
 local function nowTime()
     local dt = os.date("*t")
@@ -95,10 +96,9 @@ local function appendLogLine(line)
 end
 
 local function sendToolLog(message)
-    local req = (syn and syn.request) or (http and http.request) or request or http_request
-    if req then
+    if requestFunc then
         pcall(function()
-            req({
+            requestFunc({
                 Url = "http://127.0.0.1:23999/log",
                 Method = "POST",
                 Headers = { ["Content-Type"] = "application/json" },
@@ -107,6 +107,19 @@ local function sendToolLog(message)
         end)
     end
     appendLogLine(message)
+end
+
+local function toolAlive()
+    if not requestFunc then
+        return false
+    end
+    local ok, res = pcall(function()
+        return requestFunc({ Url = "http://127.0.0.1:23999/ping", Method = "GET" })
+    end)
+    if not ok or not res or (res.StatusCode ~= 200 and res.StatusCode ~= 204 and res.StatusCode ~= 404) then
+        return false
+    end
+    return true
 end
 
 local function isBlockedName(name)
@@ -147,20 +160,29 @@ local function loadBlockedList(userName)
 end
 
 local function waitForData(userName)
-    while true do
-        if not canUseTool() then
-            notify("Turn on the tool first ❌")
-            return false
-        end
-
-        if loadBlockedList(userName) then
-            return true
-        end
-
-        notify("🫸Cant see data, sent request back to tool, retry in 3s")
-        sendToolRequest(userName)
-        task.wait(3)
+    if not isfolder or not isfolder(TOOL_FOLDER) then
+        notify("Turn on the tool first ❌")
+        return false
     end
+
+    if not toolAlive() then
+        notify("Tool is not running. Start the tool first ❌")
+        return false
+    end
+
+    if loadBlockedList(userName) then
+        return true
+    end
+
+    sendToolRequest(userName)
+    task.wait(3)
+
+    if loadBlockedList(userName) then
+        return true
+    end
+
+    notify("Cant read data. Start the tool and try again.")
+    return false
 end
 
 local function getOtherBlockedSet(otherName)
