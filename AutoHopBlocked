@@ -1,30 +1,41 @@
--- Auto Hop Blocked (client-side)
--- Requires executor functions: isfolder, isfile, readfile, writefile, and (optional) request/http_request.
-
-if _G.AutoHopBlockedRunning then
-    warn("Auto Hop Blocked is already running.")
-    return
-end
-_G.AutoHopBlockedRunning = true
-
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
+local StarterGui = game:GetService("StarterGui")
 
 local TOOL_FOLDER = "datablock"
 local REQUEST_FILE = TOOL_FOLDER .. "/_request.txt"
+local LOG_FILE = TOOL_FOLDER .. "/_script.log"
 local SCRIPT_URL = "https://raw.githubusercontent.com/Nsama239/autohopblocked/main/AutoHopBlocked"
 local AUTO_REFRESH_SECONDS = 6 * 60 * 60
 local HOP_COOLDOWN = 15
+local NOTIFY_SECONDS = 3
 
 local localPlayer = Players.LocalPlayer
 local lastHop = 0
 local blockedSet = {}
+local lastLoadedCount = 0
 
 local function nowTime()
     local dt = os.date("*t")
     return string.format("%02d:%02d:%02d", dt.hour, dt.min, dt.sec)
 end
+
+local function notify(message)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = "Auto Hop Blocked",
+            Text = message,
+            Duration = NOTIFY_SECONDS,
+        })
+    end)
+end
+
+if _G.AutoHopBlockedRunning then
+    notify("Auto Hop Blocked is already running.")
+    return
+end
+_G.AutoHopBlockedRunning = true
 
 local function toHandle(name)
     if not name or name == "" then
@@ -38,6 +49,13 @@ end
 
 local function safeLower(name)
     return string.lower(name or "")
+end
+
+local function normalizeName(name)
+    local value = name or ""
+    value = value:gsub("^%s+", ""):gsub("%s+$", "")
+    value = value:gsub("^@", "")
+    return safeLower(value)
 end
 
 local function canUseTool()
@@ -57,6 +75,25 @@ local function sendToolRequest(userName)
     end)
 end
 
+local function appendLogLine(line)
+    if not writefile then
+        return
+    end
+
+    pcall(function()
+        if appendfile then
+            appendfile(LOG_FILE, line .. "\n")
+            return
+        end
+
+        local current = ""
+        if isfile and readfile and isfile(LOG_FILE) then
+            current = readfile(LOG_FILE)
+        end
+        writefile(LOG_FILE, current .. line .. "\n")
+    end)
+end
+
 local function sendToolLog(message)
     local req = (syn and syn.request) or (http and http.request) or request or http_request
     if req then
@@ -69,7 +106,11 @@ local function sendToolLog(message)
             })
         end)
     end
-    print(message)
+    appendLogLine(message)
+end
+
+local function isBlockedName(name)
+    return blockedSet[normalizeName(name)] == true
 end
 
 local function loadBlockedList(userName)
@@ -80,23 +121,35 @@ local function loadBlockedList(userName)
 
     local path = filePathFor(userName)
     if not isfile(path) then
-        return false
+        local lowerPath = filePathFor(string.lower(userName))
+        if isfile(lowerPath) then
+            path = lowerPath
+        else
+            return false
+        end
     end
 
     local data = readfile(path)
+    local count = 0
     for line in string.gmatch(data, "[^\r\n]+") do
         local trimmed = string.match(line, "^%s*(.-)%s*$")
         if trimmed and trimmed ~= "" then
-            blockedSet[safeLower(trimmed)] = true
+            blockedSet[normalizeName(trimmed)] = true
+            count += 1
         end
     end
+
+    lastLoadedCount = count
+    local msg = string.format("[%s] %s loaded %d blocked users", nowTime(), userName, count)
+    appendLogLine(msg)
+    sendToolLog(msg)
     return true
 end
 
 local function waitForData(userName)
     while true do
         if not canUseTool() then
-            warn("Turn on the tool first ❌")
+            notify("Turn on the tool first ❌")
             return false
         end
 
@@ -104,7 +157,7 @@ local function waitForData(userName)
             return true
         end
 
-        warn("🫸Cant see data , sent request back to tool , retry in 3s")
+        notify("🫸Cant see data, sent request back to tool, retry in 3s")
         sendToolRequest(userName)
         task.wait(3)
     end
@@ -184,9 +237,11 @@ local function hopServer(reasonName)
         local message = string.format("[%s] %s met %s -> %s switched server (jobId: %s)",
             nowTime(), localPlayer.Name, reasonName, localPlayer.Name, server.id)
         sendToolLog(message)
+        notify(string.format("%s met %s -> hopping server", localPlayer.Name, reasonName))
         TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, localPlayer)
     else
         sendToolLog(string.format("[%s] %s met %s -> no server found", nowTime(), localPlayer.Name, reasonName))
+        notify("No server found to hop.")
     end
 end
 
@@ -195,12 +250,11 @@ local function scanForConflicts()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= localPlayer then
             local otherName = player.Name
-            local lower = safeLower(otherName)
-            if blockedSet[lower] then
+            if isBlockedName(otherName) then
                 table.insert(conflicts, otherName)
             else
                 local otherBlocked = getOtherBlockedSet(otherName)
-                if otherBlocked[safeLower(localPlayer.Name)] then
+                if otherBlocked[normalizeName(localPlayer.Name)] then
                     table.insert(conflicts, otherName)
                 end
             end
@@ -210,6 +264,10 @@ local function scanForConflicts()
     if #conflicts == 0 then
         return
     end
+
+    local foundMsg = string.format("[%s] %s found blocked/flagged users: %s", nowTime(), localPlayer.Name, table.concat(conflicts, ", "))
+    sendToolLog(foundMsg)
+    notify("Found blocked user, hopping...")
 
     local group = { localPlayer.Name }
     for _, name in ipairs(conflicts) do
@@ -223,12 +281,14 @@ local function scanForConflicts()
 end
 
 if not canUseTool() then
-    warn("Turn on the tool first ❌")
+    notify("Turn on the tool first ❌")
     return
 end
 
 if waitForData(localPlayer.Name) then
-    print(string.format("Finally! Success Apply Config to %s, Auto Hop Blocked Enabled ✅", toHandle(localPlayer.Name)))
+    notify(string.format("Finally! Success Apply Config to %s, Auto Hop Blocked Enabled ✅", toHandle(localPlayer.Name)))
+    sendToolLog(string.format("[%s] %s started Auto Hop Blocked", nowTime(), localPlayer.Name))
+    appendLogLine(string.format("[%s] %s started Auto Hop Blocked", nowTime(), localPlayer.Name))
 
     task.spawn(function()
         while true do
