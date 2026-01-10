@@ -1,6 +1,12 @@
 -- Auto Hop Blocked (client-side)
 -- Requires executor functions: isfolder, isfile, readfile, writefile, and (optional) request/http_request.
 
+if _G.AutoHopBlockedRunning then
+    warn("Auto Hop Blocked is already running.")
+    return
+end
+_G.AutoHopBlockedRunning = true
+
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
