@@ -1,2 +1,240 @@
+-- Auto Hop Blocked (client-side)
+-- Requires executor functions: isfolder, isfile, readfile, writefile, and (optional) request/http_request.
 
-adâdaadda
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+
+local TOOL_FOLDER = "datablock"
+local REQUEST_FILE = TOOL_FOLDER .. "/_request.txt"
+local SCRIPT_URL = "https://raw.githubusercontent.com/Nsama239/autohopblocked/main/AutoHopBlocked"
+local AUTO_REFRESH_SECONDS = 6 * 60 * 60
+local HOP_COOLDOWN = 15
+
+local localPlayer = Players.LocalPlayer
+local lastHop = 0
+local blockedSet = {}
+
+local function nowTime()
+    local dt = os.date("*t")
+    return string.format("%02d:%02d:%02d", dt.hour, dt.min, dt.sec)
+end
+
+local function toHandle(name)
+    if not name or name == "" then
+        return "@unknown"
+    end
+    if name:sub(1, 1) == "@" then
+        return name
+    end
+    return "@" .. name
+end
+
+local function safeLower(name)
+    return string.lower(name or "")
+end
+
+local function canUseTool()
+    return isfolder and isfolder(TOOL_FOLDER)
+end
+
+local function filePathFor(userName)
+    return TOOL_FOLDER .. "/" .. userName .. ".txt"
+end
+
+local function sendToolRequest(userName)
+    if not writefile then
+        return
+    end
+    pcall(function()
+        writefile(REQUEST_FILE, userName .. "|" .. os.time())
+    end)
+end
+
+local function sendToolLog(message)
+    local req = (syn and syn.request) or (http and http.request) or request or http_request
+    if req then
+        pcall(function()
+            req({
+                Url = "http://127.0.0.1:23999/log",
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode({ message = message }),
+            })
+        end)
+    end
+    print(message)
+end
+
+local function loadBlockedList(userName)
+    blockedSet = {}
+    if not isfile or not readfile then
+        return false
+    end
+
+    local path = filePathFor(userName)
+    if not isfile(path) then
+        return false
+    end
+
+    local data = readfile(path)
+    for line in string.gmatch(data, "[^\r\n]+") do
+        local trimmed = string.match(line, "^%s*(.-)%s*$")
+        if trimmed and trimmed ~= "" then
+            blockedSet[safeLower(trimmed)] = true
+        end
+    end
+    return true
+end
+
+local function waitForData(userName)
+    while true do
+        if not canUseTool() then
+            warn("Turn on the tool first ❌")
+            return false
+        end
+
+        if loadBlockedList(userName) then
+            return true
+        end
+
+        warn("🫸Cant see data , sent request back to tool , retry in 3s")
+        sendToolRequest(userName)
+        task.wait(3)
+    end
+end
+
+local function getOtherBlockedSet(otherName)
+    if not isfile or not readfile then
+        return {}
+    end
+
+    local path = filePathFor(otherName)
+    if not isfile(path) then
+        return {}
+    end
+
+    local set = {}
+    local data = readfile(path)
+    for line in string.gmatch(data, "[^\r\n]+") do
+        local trimmed = string.match(line, "^%s*(.-)%s*$")
+        if trimmed and trimmed ~= "" then
+            set[safeLower(trimmed)] = true
+        end
+    end
+    return set
+end
+
+local function chooseStayAccount(conflicts)
+    table.sort(conflicts, function(a, b)
+        return safeLower(a) < safeLower(b)
+    end)
+    return conflicts[1]
+end
+
+local function fetchServers(cursor)
+    local placeId = game.PlaceId
+    local url = string.format(
+        "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100%s",
+        placeId,
+        cursor and ("&cursor=" .. cursor) or ""
+    )
+    local body = game:HttpGet(url)
+    return HttpService:JSONDecode(body)
+end
+
+local function findLowServer()
+    local cursor = nil
+    local bestServer = nil
+    local bestPlayers = math.huge
+
+    for _ = 1, 4 do
+        local data = fetchServers(cursor)
+        for _, server in ipairs(data.data or {}) do
+            if server.id ~= game.JobId and server.playing < server.maxPlayers then
+                if server.playing < bestPlayers then
+                    bestPlayers = server.playing
+                    bestServer = server
+                end
+            end
+        end
+        cursor = data.nextPageCursor
+        if not cursor then
+            break
+        end
+    end
+
+    return bestServer
+end
+
+local function hopServer(reasonName)
+    if os.time() - lastHop < HOP_COOLDOWN then
+        return
+    end
+    lastHop = os.time()
+
+    local server = findLowServer()
+    if server then
+        local message = string.format("[%s] %s met %s -> %s switched server (jobId: %s)",
+            nowTime(), localPlayer.Name, reasonName, localPlayer.Name, server.id)
+        sendToolLog(message)
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, localPlayer)
+    else
+        sendToolLog(string.format("[%s] %s met %s -> no server found", nowTime(), localPlayer.Name, reasonName))
+    end
+end
+
+local function scanForConflicts()
+    local conflicts = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= localPlayer then
+            local otherName = player.Name
+            local lower = safeLower(otherName)
+            if blockedSet[lower] then
+                table.insert(conflicts, otherName)
+            else
+                local otherBlocked = getOtherBlockedSet(otherName)
+                if otherBlocked[safeLower(localPlayer.Name)] then
+                    table.insert(conflicts, otherName)
+                end
+            end
+        end
+    end
+
+    if #conflicts == 0 then
+        return
+    end
+
+    local group = { localPlayer.Name }
+    for _, name in ipairs(conflicts) do
+        table.insert(group, name)
+    end
+
+    local stay = chooseStayAccount(group)
+    if safeLower(stay) ~= safeLower(localPlayer.Name) then
+        hopServer(conflicts[1])
+    end
+end
+
+if not canUseTool() then
+    warn("Turn on the tool first ❌")
+    return
+end
+
+if waitForData(localPlayer.Name) then
+    print(string.format("Finally! Success Apply Config to %s, Auto Hop Blocked Enabled ✅", toHandle(localPlayer.Name)))
+
+    task.spawn(function()
+        while true do
+            task.wait(AUTO_REFRESH_SECONDS)
+            loadBlockedList(localPlayer.Name)
+        end
+    end)
+
+    task.spawn(function()
+        while true do
+            task.wait(3)
+            scanForConflicts()
+        end
+    end)
+end
